@@ -1,318 +1,516 @@
+# pages/1_P&L_Analysis_&_Drilldown.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import plotly.express as px
+import time
 
-# --- SET PAGE CONFIG FIRST ---
-st.set_page_config(layout="wide", page_title="P&L Analyzer")
+# Import shared utilities and data processing functions
+import utils
+import data_processor
+from prompts import get_pnl_analysis_prompt
 
-# --- Add Current Time Context & Location ---
-current_time = datetime.now()
-st.sidebar.write(f"Timestamp: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-st.sidebar.write(f"Location Context: Denver, CO, USA") # Placeholder
+# --- Page Setup ---
+st.set_page_config(layout="wide", page_title="P&L Analysis")
+st.markdown(f"<style> h1 {{ color: {utils.EY_DARK_BLUE_GREY}; }} </style>", unsafe_allow_html=True)
 
-# --- Define EY Parthenon Inspired Colors ---
-EY_YELLOW = "#FFE600"
-EY_DARK_BLUE_GREY = "#2E2E38"
-EY_TEXT_ON_YELLOW = EY_DARK_BLUE_GREY
+# --- Check if data is loaded ---
+if 'data_loaded' not in st.session_state or not st.session_state.data_loaded:
+    st.error("Data not loaded. Please go back to the main page.")
+    st.stop()
 
-# --- Import data and functions ---
+# --- Retrieve data from Session State ---
 try:
-    exec(open("data_processor.py").read(), globals())
-    JE_AMOUNT_COLUMN = 'Amount (Presentation Currency)'
-    if 'je_detail_df' not in globals() or not isinstance(je_detail_df, pd.DataFrame): st.error("Failed to load 'je_detail_df'."); st.stop()
-    if JE_AMOUNT_COLUMN not in je_detail_df.columns: st.error(f"JE Amount column '{JE_AMOUNT_COLUMN}' not found."); st.stop()
-    if JE_DATE_COLUMN not in je_detail_df.columns: st.error(f"JE Date column '{JE_DATE_COLUMN}' not found."); st.stop()
-    if 'Account Name' not in je_detail_df.columns: JE_ACCOUNT_NAME_COL = None
-    else: JE_ACCOUNT_NAME_COL = 'Account Name'
-    if not all(k in globals() for k in ['pl_flat_df', 'get_journal_entries', 'PL_ID_COLUMN', 'PL_MAP_COLUMN', 'JE_ID_COLUMN']):
-        missing = [k for k in ['pl_flat_df', 'je_detail_df', 'get_journal_entries', 'PL_ID_COLUMN', 'PL_MAP_COLUMN', 'JE_ID_COLUMN', 'JE_DATE_COLUMN'] if k not in globals()]
-        st.error(f"Could not load necessary data/functions. Missing: {missing}"); st.stop()
-except FileNotFoundError: st.error("Error: `data_processor.py` not found."); st.stop()
-except Exception as e: st.error(f"Error running `data_processor.py` or loading data: {e}"); st.stop()
+    pl_flat_df = st.session_state.pl_flat_df; je_detail_df = st.session_state.je_detail_df
+    col_config = st.session_state.column_config
+    PL_ID_COLUMN = col_config["PL_ID"]; PL_MAP_COLUMN = col_config["PL_MAP_DISPLAY"]
+    JE_ID_COLUMN = col_config["JE_ID"]; JE_DATE_COLUMN = col_config["JE_DATE"]
+    JE_AMOUNT_COLUMN = col_config["JE_AMOUNT"]; JE_ACCOUNT_NAME_COL = col_config["JE_ACCOUNT_NAME"]
+except KeyError as e: st.error(f"Missing data/config: {e}. Reload app."); st.stop()
 
-# --- Initialize Session State ---
-# (Add state for chart selection)
+# --- Initialize/Ensure necessary session state keys ---
+if 'llm_analyses' not in st.session_state: st.session_state.llm_analyses = {}
+if 'llm_streaming_key' not in st.session_state: st.session_state.llm_streaming_key = None
 if 'selected_account_id' not in st.session_state: st.session_state.selected_account_id = None
 if 'selected_account_name' not in st.session_state: st.session_state.selected_account_name = None
 if 'selected_period' not in st.session_state: st.session_state.selected_period = None
+if 'related_jes_df' not in st.session_state: st.session_state.related_jes_df = pd.DataFrame(columns=col_config.get("JE_DETAILS_BASE", []))
+# Ensure prev_ keys exist
 if 'prev_selected_account_id' not in st.session_state: st.session_state.prev_selected_account_id = None
 if 'prev_selected_period' not in st.session_state: st.session_state.prev_selected_period = None
-if 'related_jes_df' not in st.session_state: st.session_state.related_jes_df = pd.DataFrame()
-if 'dup_col' not in st.session_state: st.session_state.dup_col = None
-if 'dup_val' not in st.session_state: st.session_state.dup_val = None
-if 'dup_search_triggered' not in st.session_state: st.session_state.dup_search_triggered = False
-# Initialize chart selection state (using default logic)
-if 'chart_accounts_selection' not in st.session_state:
-    # Determine default selection for chart (run this logic only once)
-    temp_account_options = pl_flat_df[PL_MAP_COLUMN].unique().tolist() # Need options list here
-    default_chart_selection = []
-    potential_defaults = ["Total Net Sales", "Total COGS/COS", "Total Operating Expenses"]
-    for acc in potential_defaults:
-        if acc in temp_account_options: default_chart_selection.append(acc)
-    if not default_chart_selection and temp_account_options:
-        default_chart_selection = temp_account_options[:min(3, len(temp_account_options))]
-    st.session_state.chart_accounts_selection = default_chart_selection
 
 
-# --- Robust Formatting Function ---
-def format_amount_safely(value):
-    if pd.isna(value): return ""
-    if isinstance(value, (int, float, np.number)):
-        try: return f"{value:,.0f}"
-        except (TypeError, ValueError): return str(value)
-    else:
-        try: num = pd.to_numeric(value); return f"{num:,.0f}"
-        except (TypeError, ValueError): return str(value)
-
-# --- Corrected get_index function definition ---
-def get_index(options_list, value):
-    try: return options_list.index(value)
-    except ValueError: return 0
-
-# --- Streamlit App Layout ---
-st.markdown(f"<h1 style='color: {EY_DARK_BLUE_GREY};'>P&L Analyzer (Adjustable Outliers)</h1>", unsafe_allow_html=True)
-
-# --- Sidebar Controls ---
-st.sidebar.header("Controls")
-threshold_std_dev = st.sidebar.slider("Outlier Sensitivity (Std Deviations)", 1.0, 4.0, 2.0, 0.1, help="Lower = More sensitive")
-st.sidebar.markdown("---")
-st.sidebar.header("Select Data for JE Lookup")
-st.sidebar.caption("Use these OR click row/column in the table.")
-
-# --- Prepare P&L Data ---
-# (P&L data prep code remains the same)
+# --- Prepare P&L Data (Pivot, Diff, StdDev, Options) ---
 try:
-    pl_flat_df['Period_dt'] = pd.to_datetime(pl_flat_df['Period'], errors='coerce')
-    has_valid_dates = pl_flat_df['Period_dt'].notna().all()
-    if not has_valid_dates: pl_flat_df['Period_Str'] = pl_flat_df.apply(lambda row: row['Period_dt'].strftime('%Y-%m') if pd.notna(row['Period_dt']) else str(row['Period']), axis=1); x_axis_col_chart = 'Period_Str'
-    else: pl_flat_df['Period_Str'] = pl_flat_df['Period_dt'].dt.strftime('%Y-%m'); x_axis_col_chart = 'Period_dt'
-    period_col_for_pivot = 'Period_Str'
-    pnl_wide_view_df = pl_flat_df.pivot_table(index=[PL_ID_COLUMN, PL_MAP_COLUMN], columns=period_col_for_pivot, values='Amount').fillna(0).sort_index(axis=1)
-    pnl_wide_view_df_reset = pnl_wide_view_df.reset_index()
-    diff_df = pnl_wide_view_df.diff(axis=1)
+    # Ensure Period columns are correct for pivoting
+    if 'Period_dt' not in pl_flat_df.columns or pl_flat_df['Period_dt'].isnull().any():
+         pl_flat_df['Period_dt'] = pd.to_datetime(pl_flat_df['Period'], errors='coerce')
+         # Use apply with error handling for string conversion
+         pl_flat_df['Period_Str'] = pl_flat_df.apply(lambda r: r['Period_dt'].strftime('%Y-%m') if pd.notna(r['Period_dt']) else str(r['Period']), axis=1)
+         period_col_for_pivot = 'Period_Str'
+    else:
+         pl_flat_df['Period_Str'] = pl_flat_df['Period_dt'].dt.strftime('%Y-%m'); period_col_for_pivot = 'Period_Str'
+
+    pnl_wide_view_df = pl_flat_df.pivot_table(index=[PL_ID_COLUMN, PL_MAP_COLUMN], columns=period_col_for_pivot, values='Amount').fillna(0)
+    pnl_wide_view_df = pnl_wide_view_df.sort_index(axis=1) # Sort columns (periods) chronologically
+
+    # Calculate differences and standard deviations for highlighting
+    diff_df = pnl_wide_view_df.diff(axis=1); row_std_diff = pnl_wide_view_df.diff(axis=1).std(axis=1, skipna=True).fillna(0)
+
+    # Prepare for table display and selections
+    pnl_wide_view_df_reset = pnl_wide_view_df.reset_index() # Keep a resettable version for lookup if needed
+
+    # Get options for widgets/mapping
+    account_options = sorted(pnl_wide_view_df.index.get_level_values(PL_MAP_COLUMN).unique().tolist())
+    unique_indices = pnl_wide_view_df.index.unique(); # Get unique multi-index tuples (ID, Name)
+    # Robust mapping creation handling potential non-hashable types (though unlikely with IDs/Names)
+    account_name_to_id_map = {n: i for i, n in unique_indices if isinstance(i,(str,int,float)) and isinstance(n,(str,int,float))}
+    account_id_to_name_map = {i: n for i, n in unique_indices if isinstance(i,(str,int,float)) and isinstance(n,(str,int,float))}
     period_options = pnl_wide_view_df.columns.tolist()
-    row_std_diff = pnl_wide_view_df.diff(axis=1).std(axis=1, skipna=True).fillna(0)
 except Exception as e: st.error(f"Error preparing P&L data: {e}"); st.exception(e); st.stop()
 
-# --- Outlier Highlighting Function ---
-# (Definition remains the same)
-def highlight_outliers_pandas(row, diffs_df, thresholds_series):
-    try: row_diff = diffs_df.loc[row.name]; threshold_value = thresholds_series.loc[row.name]
-    except KeyError: return [''] * len(row)
-    except Exception: return [''] * len(row)
-    styles = [''] * len(row.index);
-    for i, period in enumerate(row.index):
-        if i == 0: continue
-        diff_val = row_diff.get(period)
-        if pd.notna(diff_val) and pd.notna(threshold_value) and threshold_value > 1e-6 and abs(diff_val) > threshold_value:
-            if i < len(styles): styles[i] = f'background-color: {EY_YELLOW}; color: {EY_TEXT_ON_YELLOW};'
-    return styles
 
-# --- Sidebar Selection Widgets Logic ---
-# (Code remains the same)
-account_options = pnl_wide_view_df.index.get_level_values(PL_MAP_COLUMN).unique().tolist()
-account_name_to_id_map = {name: id_ for id_, name in pnl_wide_view_df.index.unique()}
-account_id_to_name_map = {id_: name for id_, name in pnl_wide_view_df.index.unique()}
-current_account_name = account_id_to_name_map.get(st.session_state.selected_account_id, account_options[0] if account_options else None)
-sorted_account_options = sorted(account_options)
-account_index = get_index(sorted_account_options, current_account_name) if current_account_name else 0
-period_index = get_index(period_options, st.session_state.selected_period) if st.session_state.selected_period else len(period_options) - 1
-sb_selected_account_name = st.sidebar.selectbox("Select GL Account:", options=sorted_account_options, index=account_index, key="sb_account")
-sb_selected_period = st.sidebar.selectbox("Select Period:", options=period_options, index=period_index, key="sb_period")
+# --- Sidebar Elements ---
 
-# --- Synchronize Sidebar selection ---
-# (Code remains the same)
-sidebar_account_id = account_name_to_id_map.get(sb_selected_account_name)
-sidebar_period = sb_selected_period
-sidebar_changed = False
-if sidebar_account_id != st.session_state.selected_account_id or sidebar_period != st.session_state.selected_period:
-    st.session_state.selected_account_id = sidebar_account_id; st.session_state.selected_account_name = sb_selected_account_name; st.session_state.selected_period = sidebar_period
-    st.session_state.selected_je_col = None; st.session_state.selected_je_val = None
-    sidebar_changed = True
+# LLM Analysis History
+st.sidebar.header("LLM Analysis History")
+if st.sidebar.button("Clear History", key='clear_llm_hist_btn'):
+    st.session_state.llm_analyses = {}; st.session_state.llm_streaming_key = None; st.rerun()
+if 'llm_analyses' in st.session_state and st.session_state.llm_analyses:
+    analysis_keys = list(st.session_state.llm_analyses.keys()); MAX_HISTORY = 10
+    st.sidebar.caption(f"Showing latest {min(len(analysis_keys), MAX_HISTORY)}:")
+    for key in reversed(analysis_keys[-MAX_HISTORY:]):
+         try:
+             acc_id, acc_name, period = key; result = st.session_state.llm_analyses[key]
+             is_streaming = (st.session_state.llm_streaming_key == key)
+             expander_label = f"{acc_name} - {period}" + (" (Processing...)" if is_streaming else "")
+             with st.sidebar.expander(expander_label):
+                 if is_streaming: st.info("🔄 Processing...")
+                 st.markdown(result if result else "_Analysis initiated..._")
+         except Exception as e_hist: st.sidebar.warning(f"Err display hist {key}: {e_hist}")
+else: st.sidebar.caption("No analyses run yet.")
+st.sidebar.markdown("---")
 
-# --- Fetch Journal Entries ---
-# (Fetch logic remains the same)
-should_fetch = False; table_changed_flag = False
-if st.session_state.selected_account_id and st.session_state.selected_period:
-     if (st.session_state.selected_account_id != st.session_state.prev_selected_account_id or
-         st.session_state.selected_period != st.session_state.prev_selected_period or
-         (st.session_state.related_jes_df.empty and (sidebar_changed))):
-            should_fetch = True
-if 'df_selection_processed' in locals() and df_selection_processed: table_changed_flag = True
-if should_fetch and not table_changed_flag:
+# Outlier Sensitivity Slider
+st.sidebar.header("P&L Controls")
+threshold_std_dev = st.sidebar.slider("Outlier Sensitivity", 1.0, 4.0, st.session_state.get('outlier_threshold', 2.0), 0.1, key='outlier_threshold')
+
+
+# --- Page Content Area ---
+
+st.markdown(f"<h1>P&L Analysis & JE Drilldown</h1>", unsafe_allow_html=True)
+
+# --- Filters moved to main area ---
+st.markdown("#### Select Account & Period")
+col1, col2 = st.columns(2)
+
+# Use session state to determine initial index for filters
+current_account_name = st.session_state.get('selected_account_name')
+current_period = st.session_state.get('selected_period')
+account_index = utils.get_index(account_options, current_account_name)
+period_index = utils.get_index(period_options, current_period)
+
+with col1:
+    widget_account_name = st.selectbox(
+        "GL Account:", options=account_options, index=account_index, key="widget_account_select"
+    )
+with col2:
+    widget_period = st.selectbox(
+        "Period:", options=period_options, index=period_index, key="widget_period_select"
+    )
+
+# --- Update Central State Based on Widgets (if changed by user) ---
+widget_account_id = account_name_to_id_map.get(widget_account_name)
+# Check if widgets caused a change compared to the central state
+if (widget_account_id != st.session_state.get('selected_account_id') or
+    widget_period != st.session_state.get('selected_period')):
+    st.session_state.selected_account_id = widget_account_id
+    st.session_state.selected_account_name = widget_account_name
+    st.session_state.selected_period = widget_period
+    # Reset dependent states that need re-fetching or clearing
+    st.session_state.related_jes_df = pd.DataFrame(columns=col_config.get("JE_DETAILS_BASE", [])) # Clear JEs
+    st.session_state.dup_col = None; st.session_state.dup_val = None; st.session_state.dup_search_triggered = False
+    st.session_state.llm_streaming_key = None
+    # No explicit rerun needed here, Streamlit reruns automatically on widget change
+
+
+# --- Process Table Selection --- (MODIFIED: ADDED st.rerun())
+table_selection_state = st.session_state.get("pnl_select_df", {"rows": [], "columns": []})
+selected_rows_indices = table_selection_state.get('rows', [])
+selected_cols_names = table_selection_state.get('columns', [])
+
+if selected_rows_indices and selected_cols_names:
     try:
-        st.session_state.related_jes_df = get_journal_entries(st.session_state.selected_account_id, st.session_state.selected_period, je_detail_df)
-        st.session_state.prev_selected_account_id = st.session_state.selected_account_id; st.session_state.prev_selected_period = st.session_state.selected_period
-        st.session_state.selected_je_col = None; st.session_state.selected_je_val = None
-    except Exception as e_fetch: st.error(f"An error fetching JEs: {e_fetch}"); st.session_state.related_jes_df = pd.DataFrame()
+        selected_row_pos_index = selected_rows_indices[0] # Get positional index from selection state
+        selected_row_data = pnl_wide_view_df_reset.iloc[selected_row_pos_index] # Use iloc on reset df
 
-# --- Define Tabs ---
-tab1, tab2 = st.tabs([" P&L Analysis & Drilldown ", " Visualizations "])
+        table_account_id = str(selected_row_data[PL_ID_COLUMN]);
+        table_account_name = selected_row_data[PL_MAP_COLUMN];
+        table_period = selected_cols_names[0] # Column name is the period
 
-# --- TAB 1: P&L ANALYSIS & DRILLDOWN ---
-with tab1:
-    # (Code for P&L Table, Table Selection, JE Details, Duplicate Finder remains the same as Response #39)
-    # ... [P&L Table Display code] ...
-    st.markdown(f"<h2 style='color: {EY_DARK_BLUE_GREY};'>Profit & Loss Overview (Monthly)</h2>", unsafe_allow_html=True)
-    st.caption("Highlighting indicates MoM change > selected Std Deviations. Click row index + column header to select via table.")
-    try:
-        outlier_threshold_values_mi = threshold_std_dev * row_std_diff
-        styled_df = pnl_wide_view_df.style.apply(highlight_outliers_pandas, axis=1, diffs_df=diff_df, thresholds_series=outlier_threshold_values_mi).format("{:,.0f}")
-        st.dataframe(styled_df, use_container_width=True, key="pnl_select_df", on_select="rerun", selection_mode=("single-row", "single-column"))
-    except Exception as e_style: st.error(f"Error displaying P&L table: {e_style}"); st.exception(e_style); st.dataframe(pnl_wide_view_df.style.format("{:,.0f}"), use_container_width=True)
+        # Check if table click represents a NEW selection compared to current central state
+        if (table_account_id != st.session_state.get('selected_account_id') or
+            table_period != st.session_state.get('selected_period')):
+            # If it's new, update the central state
+            st.session_state.selected_account_id = table_account_id
+            st.session_state.selected_account_name = table_account_name
+            st.session_state.selected_period = table_period
+            # Reset dependent states
+            st.session_state.related_jes_df = pd.DataFrame(columns=col_config.get("JE_DETAILS_BASE", []))
+            st.session_state.dup_col = None; st.session_state.dup_val = None; st.session_state.dup_search_triggered = False
+            st.session_state.llm_streaming_key = None
 
-    # Process Table Selection
-    df_selection_processed = False; table_changed = False
-    if "pnl_select_df" in st.session_state:
-        selection_state = st.session_state.pnl_select_df.selection
-        selected_rows_indices = selection_state.get('rows', []); selected_cols_names = selection_state.get('columns', [])
-        if selected_rows_indices and selected_cols_names:
-            try:
-                selected_row_pos_index = selected_rows_indices[0]; selected_row_data = pnl_wide_view_df_reset.iloc[selected_row_pos_index]
-                table_account_id = str(selected_row_data[PL_ID_COLUMN]); table_account_name = selected_row_data[PL_MAP_COLUMN]; table_period = selected_cols_names[0]
-                if table_account_id != st.session_state.selected_account_id or table_period != st.session_state.selected_period:
-                    st.session_state.selected_account_id = table_account_id; st.session_state.selected_account_name = table_account_name; st.session_state.selected_period = table_period
-                    st.session_state.selected_je_col = None; st.session_state.selected_je_val = None
-                    df_selection_processed = True; table_changed = True
-                    st.rerun()
-            except Exception as e_proc: st.warning(f"Could not process Table selection: {e_proc}")
+            # **** ADDED EXPLICIT RERUN ****
+            st.rerun() # Force an immediate rerun after state update, mimicking old script
 
-    # Display Journal Entry Details
-    st.markdown(f"<hr><h2 style='color: {EY_DARK_BLUE_GREY};'>Journal Entry Details</h2>", unsafe_allow_html=True)
-    related_jes_to_display = st.session_state.related_jes_df
-    if st.session_state.selected_account_id and st.session_state.selected_period:
-        st.write(f"Showing JEs for: **{st.session_state.selected_account_name} ({st.session_state.selected_account_id})** | Period: **{st.session_state.selected_period}**")
-        if isinstance(related_jes_to_display, pd.DataFrame) and not related_jes_to_display.empty:
-            je_display_df = related_jes_to_display.copy(); je_amount_cols = [col for col in je_display_df.columns if 'Amount' in col or 'Debit' in col or 'Credit' in col]
-            for col in je_amount_cols: je_display_df[col] = je_display_df[col].apply(format_amount_safely) # Use robust formatting
-            je_col_config = {}; date_cols_to_format = [col for col in je_display_df.columns if 'Date' in col or JE_DATE_COLUMN in col]
-            for col in date_cols_to_format: je_col_config[col] = st.column_config.DateColumn(format="YYYY-MM-DD", help="Transaction Date")
-            st.dataframe(je_display_df, use_container_width=True, column_config=je_col_config)
-        elif isinstance(related_jes_to_display, pd.DataFrame) and related_jes_to_display.empty: st.info(f"No Journal Entries found for this account and period.")
-        else: st.warning("JE data is in an unexpected state.")
-    else: st.info("Select an Account and Period to view Journal Entries.")
-
-    # Duplicate JE Finder
-    st.markdown(f"<hr><h2 style='color: {EY_DARK_BLUE_GREY};'>Duplicate Value Lookup</h2>", unsafe_allow_html=True)
-    if not related_jes_to_display.empty:
-        # ... (Duplicate finder logic remains the same) ...
-        potential_dup_cols = ['Customer', 'Memo', 'Transaction Id', 'Amount (Presentation Currency)']; available_dup_cols = [col for col in potential_dup_cols if col in je_detail_df.columns]
-        if available_dup_cols:
-            col1, col2 = st.columns(2);
-            with col1: last_dup_col_index = available_dup_cols.index(st.session_state.dup_col) if st.session_state.dup_col in available_dup_cols else 0; selected_dup_col = st.selectbox("Select Column to Check:", options=available_dup_cols, index=last_dup_col_index, key='dup_col_select')
-            with col2:
-                if selected_dup_col and selected_dup_col in related_jes_to_display.columns: value_options = sorted(related_jes_to_display[selected_dup_col].dropna().unique()); last_dup_val_index = value_options.index(st.session_state.dup_val) if st.session_state.dup_val in value_options else 0; selected_dup_val = st.selectbox(f"Select Value from Current JEs:", options=value_options, index=last_dup_val_index, key='dup_val_select')
-                else: selected_dup_val = None; _ = st.selectbox(f"Select Value:", options=[], key='dup_val_select', disabled=True, index=0)
-            find_duplicates_button = st.button("Find All Duplicates for Selected Value")
-            if find_duplicates_button: st.session_state.dup_col = selected_dup_col; st.session_state.dup_val = selected_dup_val; st.session_state.dup_search_triggered = True
-            if st.session_state.dup_search_triggered and st.session_state.dup_col and st.session_state.dup_val is not None:
-                col_to_check = st.session_state.dup_col; val_to_find = st.session_state.dup_val; st.write(f"Finding all JEs where **{col_to_check}** is **'{val_to_find}'**...")
-                try: # Filter logic...
-                    if pd.api.types.is_numeric_dtype(je_detail_df[col_to_check].dtype) and pd.api.types.is_number(val_to_find): duplicate_jes_df = je_detail_df[np.isclose(je_detail_df[col_to_check].fillna(np.nan), val_to_find)]
-                    elif pd.api.types.is_datetime64_any_dtype(je_detail_df[col_to_check].dtype) and isinstance(val_to_find, (datetime, pd.Timestamp)): val_to_find_dt = pd.to_datetime(val_to_find, errors='coerce'); duplicate_jes_df = je_detail_df[je_detail_df[col_to_check] == val_to_find_dt] if pd.notna(val_to_find_dt) else je_detail_df[je_detail_df[col_to_check].astype(str).str.strip() == str(val_to_find).strip()]
-                    else: duplicate_jes_df = je_detail_df[je_detail_df[col_to_check].astype(str).str.strip() == str(val_to_find).strip()]
-                    if not duplicate_jes_df.empty:
-                        st.write(f"Found {len(duplicate_jes_df)} entries:")
-                        dup_col_config = {}; dup_df_display = duplicate_jes_df.copy()
-                        dup_amount_cols = [col for col in dup_df_display.columns if 'Amount' in col or 'Debit' in col or 'Credit' in col]; dup_date_cols = [col for col in dup_df_display.columns if 'Date' in col]
-                        for col in dup_amount_cols: dup_df_display[col] = dup_df_display[col].apply(format_amount_safely) # Use robust formatting
-                        for col in dup_date_cols: dup_col_config[col] = st.column_config.DateColumn(format="YYYY-MM-DD")
-                        st.dataframe(dup_df_display, use_container_width=True, column_config=dup_col_config)
-                    else: st.info(f"No other JEs found where '{col_to_check}' is '{val_to_find}'.")
-                except KeyError: st.error(f"Column '{col_to_check}' not found.")
-                except Exception as e: st.error(f"An error occurred during duplicate lookup: {e}")
-                st.session_state.dup_search_triggered = False
-        # else: st.warning("No suitable columns found for duplicate checking.")
-    else: st.info("Select Account/Period with Journal Entries displayed to enable duplicate lookup.")
+    except IndexError:
+        st.warning("Could not process table selection (Index Error). Please ensure P&L data is loaded correctly.")
+    except KeyError as e_proc_key:
+        st.warning(f"Could not process table selection (Key Error: {e_proc_key}). Check column names.")
+    except Exception as e_proc: st.warning(f"Table selection processing error: {e_proc}")
 
 
-# --- TAB 2: VISUALIZATIONS ---
-with tab2:
-    st.markdown(f"<h2 style='color: {EY_DARK_BLUE_GREY};'>P&L Account Trends</h2>", unsafe_allow_html=True)
+# --- Fetch Journal Entries Based on Comparison to Previous State --- (MODIFIED: RESTORED ORIGINAL LOGIC)
+should_fetch = False
+sel_id = st.session_state.get('selected_account_id')
+sel_period = st.session_state.get('selected_period')
+prev_id = st.session_state.get('prev_selected_account_id') # Read previous state
+prev_period = st.session_state.get('prev_selected_period') # Read previous state
 
-    # --- MODIFIED: Enhanced Multiselect for Chart ---
-    chart_account_options = sorted(pl_flat_df[PL_MAP_COLUMN].unique())
+# ORIGINAL LOGIC: Fetch if selection is valid AND differs from the previous state recorded
+if sel_id and sel_period:
+    if (sel_id != prev_id or sel_period != prev_period):
+         should_fetch = True
 
-    # Layout for multiselect and buttons
-    c1, c2, c3 = st.columns([4, 1, 1]) # Adjust ratios as needed
+if should_fetch:
+    # Optional Debug log: Uncomment to see when fetching is attempted
+    # st.sidebar.info(f"DEBUG: Fetch Triggered (Original Logic) for {sel_id}, {sel_period}")
+    if sel_id and sel_period: # Double check selection is still valid before fetching
+        try:
+            fetched_jes = data_processor.get_journal_entries(sel_id, sel_period, je_detail_df)
+            st.session_state.related_jes_df = fetched_jes # Update JE data state
 
-    with c1:
-        # Use session state for default, assign key
-        # The return value `user_chart_selection` captures direct interaction
-        user_chart_selection = st.multiselect(
-            "Select Account(s) to Plot:",
-            options=chart_account_options,
-            default=st.session_state.chart_accounts_selection, # Controlled by state
-            key="chart_multiselect_widget" # Assign key
-        )
-        # Synchronize direct widget interaction back to session state if it differs
-        if user_chart_selection != st.session_state.chart_accounts_selection:
-             st.session_state.chart_accounts_selection = user_chart_selection
-             st.rerun() # Rerun if user changed selection directly
+            # **CRUCIAL**: Update prev state *after* successful fetch
+            st.session_state.prev_selected_account_id = sel_id
+            st.session_state.prev_selected_period = sel_period
 
-    with c2:
-        st.markdown("<br>", unsafe_allow_html=True) # Add space for alignment
-        if st.button("Select All", key='select_all_chart'):
-            st.session_state.chart_accounts_selection = chart_account_options # Select all options
-            st.rerun() # Rerun to update multiselect display
-
-    with c3:
-        st.markdown("<br>", unsafe_allow_html=True) # Add space for alignment
-        if st.button("Clear Selection", key='clear_chart'):
-            st.session_state.chart_accounts_selection = [] # Clear selection
-            st.rerun() # Rerun to update multiselect display
-    # --- END: Enhanced Multiselect ---
+        except Exception as e_fetch:
+            st.error(f"Error fetching JEs: {e_fetch}")
+            st.session_state.related_jes_df = pd.DataFrame(columns=col_config.get("JE_DETAILS_BASE", [])) # Reset on error
+            # Do not update prev state on error
+    # else: # Optional: Handle case where should_fetch was True but selection became invalid
+          # st.sidebar.warning("DEBUG: Fetch skipped, selection invalid.")
 
 
-    # Plotting logic now uses st.session_state.chart_accounts_selection
-    if st.session_state.chart_accounts_selection:
-        chart_data = pl_flat_df[pl_flat_df[PL_MAP_COLUMN].isin(st.session_state.chart_accounts_selection)].copy()
-        sort_col = x_axis_col_chart
-        if sort_col in chart_data.columns: chart_data = chart_data.sort_values(by=sort_col); x_axis_label = "Period"
-        else: chart_data = pd.DataFrame()
+# --- P&L Overview Table Display ---
+st.markdown("---")
+st.markdown("#### P&L Data Overview")
+st.caption(f"Highlighting indicates MoM change > {st.session_state.outlier_threshold:.1f} Std Dev. Click row+col for JE/LLM.")
+try: # Apply styling and render dataframe
+    # Calculate thresholds based on current slider value
+    outlier_threshold_values = st.session_state.outlier_threshold * row_std_diff
+    # Apply styling (ensure helper functions are robust)
+    styled_df = pnl_wide_view_df.style.apply(
+        utils.highlight_outliers_pandas,
+        axis=1, # Apply row-wise
+        diffs_df=diff_df,
+        thresholds_series=outlier_threshold_values,
+        color=utils.EY_YELLOW,
+        text_color=utils.EY_TEXT_ON_YELLOW
+    ).format("{:,.0f}") # Apply number formatting AFTER styling
 
-        if not chart_data.empty:
-            fig = px.line(chart_data, x=sort_col, y='Amount', color=PL_MAP_COLUMN, markers=True, title="Monthly Trend for Selected Accounts")
-            fig.update_layout(xaxis_title=x_axis_label, yaxis_title="Amount ($)", yaxis_tickformat=",.0f", hovermode="x unified")
-            fig.update_traces(hovertemplate="<b>%{fullData.name}</b><br>Period: %{x}<br>Amount: %{y:,.0f}<extra></extra>")
-            st.plotly_chart(fig, use_container_width=True)
-        else: st.info("No data available for the selected accounts to plot.")
+    # Display the dataframe with selection enabled
+    st.dataframe(
+        styled_df,
+        use_container_width=True,
+        key="pnl_select_df", # Key used to access selection state
+        on_select="rerun", # Trigger script rerun on selection
+        selection_mode=("single-row", "single-column") # Allow selecting one row and one column
+    )
+except Exception as e_style: st.error(f"Error styling P&L: {e_style}"); st.exception(e_style); st.dataframe(pnl_wide_view_df.style.format("{:,.0f}"), use_container_width=True, key="pnl_select_df", on_select="rerun", selection_mode=("single-row", "single-column")) # Fallback
+
+
+# --- Journal Entry Details Display ---
+st.markdown(f"<hr><h2 style='color: {utils.EY_DARK_BLUE_GREY};'>Journal Entry Details</h2>", unsafe_allow_html=True)
+# Read the data that *should* have been updated by the fetch logic above
+related_jes_to_display = st.session_state.get('related_jes_df', pd.DataFrame())
+# Read selection state again for display consistency (this is the state AFTER potential updates)
+selected_id_disp = st.session_state.get('selected_account_id')
+selected_name_disp = st.session_state.get('selected_account_name')
+selected_period_disp = st.session_state.get('selected_period')
+
+if selected_id_disp and selected_period_disp:
+    st.write(f"Showing JEs for: **{selected_name_disp} ({selected_id_disp})** | Period: **{selected_period_disp}**")
+    if isinstance(related_jes_to_display, pd.DataFrame) and not related_jes_to_display.empty:
+         # Prepare JE table for display (formatting)
+         je_display_df = related_jes_to_display.copy()
+         # Identify amount columns for formatting
+         je_amount_cols = [col for col in je_display_df.columns if 'Amount' in col or col == JE_AMOUNT_COLUMN]
+         for col in je_amount_cols: je_display_df[col] = je_display_df[col].apply(utils.format_amount_safely)
+         # Configure columns (especially dates)
+         je_col_config = {}
+         date_cols_to_format = [col for col in je_display_df.columns if 'Date' in col or col == JE_DATE_COLUMN]
+         for col in date_cols_to_format:
+             je_col_config[col] = st.column_config.DateColumn(label=col, format="YYYY-MM-DD") # Ensure consistent date format
+
+         # Display JE dataframe
+         st.dataframe(je_display_df, use_container_width=True, column_config=je_col_config, hide_index=True)
+
+    elif isinstance(related_jes_to_display, pd.DataFrame) and related_jes_to_display.empty:
+         # Check if the fetch was successful for this selection but yielded no results
+         if (selected_id_disp == st.session_state.get('prev_selected_account_id') and
+             selected_period_disp == st.session_state.get('prev_selected_period')):
+             # If the current selection matches the last successful fetch state, and the table is empty,
+             # it means the fetch ran successfully and found nothing.
+            st.info(f"No JEs found for {selected_name_disp} in {selected_period_disp}.")
+         # else: # If selection doesn't match previous, fetch might not have run or failed, don't show "No JEs" yet.
+              # This case might be less likely now with the explicit rerun ensuring fetch happens.
+              # Consider adding a message here if needed for debugging.
+              # st.warning("DEBUG: JE display might be pending update...")
     else:
-        st.info("Select one or more accounts using the controls above to display trend chart.")
+         # related_jes_to_display is not a DataFrame (e.g., None), indicates an error upstream
+         st.warning("Journal Entry data is currently unavailable.")
+else:
+    st.info("Select Account/Period using the filters above or by clicking the P&L table.")
 
 
-    # --- JE Analysis Scatter Plot (Using ALL JEs) ---
-    # (Code remains the same as Response #39)
-    st.markdown(f"<hr><h2 style='color: {EY_DARK_BLUE_GREY};'>Total JE Analysis (Amount vs. Frequency)</h2>", unsafe_allow_html=True)
-    st.caption("Analyzes ALL Journal Entries in the dataset by the selected category.")
-    if 'je_detail_df' in globals() and isinstance(je_detail_df, pd.DataFrame) and not je_detail_df.empty:
-        potential_analysis_cols = ['Customer', 'Memo', 'Account Name']
-        analysis_cols_options = [col for col in potential_analysis_cols if col in je_detail_df.columns and (pd.api.types.is_string_dtype(je_detail_df[col]) or pd.api.types.is_object_dtype(je_detail_df[col])) and je_detail_df[col].nunique() > 1]
-        if JE_AMOUNT_COLUMN not in je_detail_df.columns: st.warning(f"Amount column '{JE_AMOUNT_COLUMN}' not found."); analysis_cols_options = []
-        if analysis_cols_options:
-            selected_analysis_col_all = st.selectbox("Analyze ALL Journal Entries by:", options=analysis_cols_options, index=0, key="je_analysis_col_tab2_all")
-            if selected_analysis_col_all:
-                st.write(f"Aggregating all {len(je_detail_df)} journal entries by **{selected_analysis_col_all}**...")
+# --- LLM Analysis Section ---
+st.markdown(f"<hr><h2 style='color: {utils.EY_DARK_BLUE_GREY};'>LLM Period Analysis</h2>", unsafe_allow_html=True)
+
+# Define state vars for clarity
+analysis_key = None
+# Check against the JE data we intend to display
+je_data_available = isinstance(related_jes_to_display, pd.DataFrame) and not related_jes_to_display.empty
+# Read model directly from session state (set on Home page)
+llm_model_currently_selected = st.session_state.get('selected_llm_model')
+
+# Conditions to show the button: valid selection, model chosen, and JEs present for the selection
+show_analysis_button = (selected_id_disp and selected_name_disp and selected_period_disp and
+                        llm_model_currently_selected and je_data_available)
+
+analysis_button_pressed = False # Reset flag each run
+
+if show_analysis_button:
+    analysis_key = (selected_id_disp, selected_name_disp, selected_period_disp) # Use display values for consistency
+    button_label = f"🤖 Analyze Period Activity with {llm_model_currently_selected}"
+    is_streaming_this = (st.session_state.llm_streaming_key == analysis_key)
+    # Change button label if analysis exists and we are not currently streaming it
+    if analysis_key in st.session_state.llm_analyses and not is_streaming_this:
+        button_label = f"🔄 Re-analyze Period Activity with {llm_model_currently_selected}"
+
+    # Disable button while streaming this specific analysis
+    if st.button(button_label, key=f"llm_btn_{analysis_key}", disabled=is_streaming_this):
+        analysis_button_pressed = True
+        st.session_state.llm_streaming_key = analysis_key # Set flag to indicate streaming start
+        # No explicit rerun needed here, button click causes rerun automatically
+
+elif selected_id_disp and selected_period_disp: # Give feedback if button isn't shown but selection is made
+    if not llm_model_currently_selected: st.warning("Select an LLM model on the Home page first.")
+    elif not je_data_available: st.warning("No JE data available for this selection to analyze.")
+    # If both model and JEs were available, the button would have shown.
+else: st.info("Select Account/Period with JEs to enable LLM analysis.")
+
+# --- Perform Analysis and Stream Output ---
+# This block runs if the button was just pressed OR if already streaming for the current selection
+current_streaming_key = st.session_state.get('llm_streaming_key')
+# Check if the key matches the currently displayed selection
+should_be_streaming_this = current_streaming_key and current_streaming_key == (selected_id_disp, selected_name_disp, selected_period_disp)
+
+# Define placeholder for streaming output - always define it so it can be cleared if needed
+analysis_output_placeholder = st.empty()
+
+# Only proceed if we should be streaming for the currently selected/displayed item
+if should_be_streaming_this:
+    model_to_use = st.session_state.get('selected_llm_model') # Read fresh again inside block
+    analysis_key_to_stream = current_streaming_key # This is the key = (id, name, period)
+
+    if not model_to_use: # Critical check: Did the model selection get lost?
+         analysis_output_placeholder.error("LLM Model configuration lost. Please re-select on the Home page.")
+         st.session_state.llm_streaming_key = None # Stop streaming state
+         # Consider adding st.rerun() if you want this error to clear immediately or update sidebar state
+    else:
+        # Prepare context for LLM (ensure using consistent selected_id_disp etc.)
+        try:
+            # Show initial status within the placeholder
+            with analysis_output_placeholder.container(): st.info(f"🤖 Contacting {model_to_use} for analysis...")
+
+            # --- Context Gathering ---
+            # Use the selection state that triggered this stream
+            account_id=analysis_key_to_stream[0]
+            account_name=analysis_key_to_stream[1]
+            current_period=analysis_key_to_stream[2]
+
+            # Retrieve P&L amounts (handle potential errors)
+            try: current_amount = pnl_wide_view_df.loc[(account_id, account_name), current_period]
+            except KeyError: current_amount = None # Account/Period might not exist in P&L wide view? Should be unlikely.
+
+            current_period_index = period_options.index(current_period) if current_period in period_options else -1
+            previous_period = period_options[current_period_index - 1] if current_period_index > 0 else None
+            previous_amount = None
+            if previous_period:
+                 try: previous_amount = pnl_wide_view_df.loc[(account_id, account_name), previous_period]
+                 except KeyError: previous_amount = None # Previous period might not exist for this account
+
+            # Use the JE data currently stored in session state (should be the correct one now)
+            je_data_to_analyze = st.session_state.related_jes_df
+            if not isinstance(je_data_to_analyze, pd.DataFrame) or je_data_to_analyze.empty:
+                raise ValueError("JE data for analysis is missing or empty.")
+
+            current_amount_str = utils.format_amount_safely(current_amount) if current_amount is not None else "N/A"
+            previous_amount_str = utils.format_amount_safely(previous_amount) if previous_amount is not None else "N/A"
+
+            # Format JE data for the prompt
+            formatted_je_data = utils.format_je_for_llm(je_data_to_analyze, JE_AMOUNT_COLUMN)
+
+            # Add outlier context if applicable
+            is_outlier_context = "";
+            try: # Optional outlier context - wrap in try/except for robustness
+                 diff_val = diff_df.loc[(account_id, account_name), current_period];
+                 std_dev_val = row_std_diff.loc[(account_id, account_name)]
+                 threshold_mult = st.session_state.outlier_threshold;
+                 threshold_val = threshold_mult * std_dev_val
+                 # Check for NaN/infinite values and ensure std dev is meaningful
+                 if pd.notna(diff_val) and pd.notna(std_dev_val) and np.isfinite(diff_val) and std_dev_val > 1e-6 and abs(diff_val) > threshold_val:
+                      is_outlier_context = f"\nNote: This period's change from prior month might be considered an outlier based on historical volatility (Sensitivity: {threshold_mult:.1f} Std Dev)."
+            except KeyError: pass # Ignore if account/period not found in diff/std dev data
+            except Exception as e_outlier: st.warning(f"Outlier context error: {e_outlier}") # Log other errors
+
+            # Generate the prompt
+            prompt = get_pnl_analysis_prompt(
+                account_name=account_name, account_id=account_id,
+                current_period=current_period, current_amount_str=current_amount_str,
+                previous_period=previous_period, previous_amount_str=previous_amount_str,
+                formatted_je_data=formatted_je_data,
+                is_outlier_context=is_outlier_context
+            )
+
+            # --- Stream response and store full result ---
+            final_response = "" # Initialize empty string to accumulate response
+            with analysis_output_placeholder.container():
+                st.markdown("---") # Visual separator in the output area
+                # Call the streaming function from utils
+                ollama_generator = utils.call_ollama_stream(prompt, model_to_use)
                 try:
-                    with st.spinner(f"Aggregating by {selected_analysis_col_all}..."):
-                         agg_data_all = je_detail_df.groupby(selected_analysis_col_all).agg(Count=('Transaction Id', 'size'), Total_Amount=(JE_AMOUNT_COLUMN, 'sum')).reset_index()
-                         agg_data_all['Abs_Total_Amount'] = agg_data_all['Total_Amount'].abs() # Use abs amount for size
-                         agg_data_all = agg_data_all.sort_values(by='Total_Amount', ascending=False)
-                    if not agg_data_all.empty:
-                        st.write(f"Relationship between Frequency and Total Amount for **{selected_analysis_col_all}** categories across all data:")
-                        fig_agg_all = px.scatter(agg_data_all, x='Count', y='Total_Amount', size='Abs_Total_Amount', hover_name=selected_analysis_col_all, title=f'All JE Analysis by {selected_analysis_col_all} (Amount vs. Frequency)', labels={'Count': 'Number of Entries (Frequency)', 'Total_Amount': 'Net Total Amount ($)'})
-                        fig_agg_all.update_layout(xaxis_title="Number of Entries (Frequency)", yaxis_title="Net Total Amount ($)", yaxis_tickformat=",.0f", xaxis_tickformat=",d")
-                        fig_agg_all.update_traces(hovertemplate=f"<b>%{{hovertext}}</b><br>Net Total Amount: %{{y:,.0f}}<br>Count: %{{x}}<extra></extra>", hovertext=agg_data_all[selected_analysis_col_all])
-                        st.plotly_chart(fig_agg_all, use_container_width=True)
-                        N_TOP = 25; st.write(f"Top {min(N_TOP, len(agg_data_all))} categories by Net Amount (All JEs):")
-                        st.dataframe(agg_data_all.head(N_TOP), use_container_width=True, column_config={selected_analysis_col_all : st.column_config.TextColumn(selected_analysis_col_all), "Count": st.column_config.NumberColumn("Count", format="%d"), "Total_Amount": st.column_config.NumberColumn("Net Total Amount ($)", format="%.0f"), "Abs_Total_Amount": st.column_config.NumberColumn("Abs Amount (for size)", format="%.0f", disabled=True) })
-                    else: st.info(f"No aggregated data to display for '{selected_analysis_col_all}' across all JEs.")
-                except KeyError as e_agg_key: st.error(f"Error during aggregation: Column mismatch? {e_agg_key}")
-                except Exception as e_agg: st.error(f"An error occurred during full JE analysis: {e_agg}"); st.exception(e_agg)
-        else: st.info("No suitable text columns found in the full JE dataset for analysis.")
-    else: st.warning("Full JE data (`je_detail_df`) is not available or empty.")
+                     # Use st.write_stream to display the generator output directly
+                     streamed_content = st.write_stream(ollama_generator)
+                     # Store the complete result (streamed_content holds the full string after completion)
+                     final_response = streamed_content if streamed_content else "*(No content received)*"
 
-    st.markdown(f"<hr><h2 style='color: {EY_DARK_BLUE_GREY};'>Other Visualizations</h2>", unsafe_allow_html=True)
-    st.info("More charts can be added here.")
+                except Exception as stream_err:
+                     st.error(f"LLM Streaming Error: {stream_err}")
+                     final_response = f"**Error during analysis streaming:** {str(stream_err)}"
+
+            # Store the complete result (or error message) in history dict
+            st.session_state.llm_analyses[analysis_key_to_stream] = final_response
+
+        except ValueError as ve: # Catch specific error from JE data check
+            st.error(f"LLM analysis preparation error: {ve}")
+            if analysis_key_to_stream: st.session_state.llm_analyses[analysis_key_to_stream] = f"Analysis setup error: {str(ve)}"
+        except Exception as e: # Catch other general errors during prep/call
+            st.error(f"LLM analysis preparation error: {e}"); st.exception(e)
+            if analysis_key_to_stream: st.session_state.llm_analyses[analysis_key_to_stream] = f"Analysis setup error: {str(e)}"
+        finally:
+            # Clear the streaming key indicator *after* processing attempt (success or failure)
+            st.session_state.llm_streaming_key = None
+            # Rerun to update UI (e.g., disable button turns back to enabled, sidebar updates)
+            st.rerun()
+
+
+# --- Duplicate JE Finder ---
+st.markdown(f"<hr><h2 style='color: {utils.EY_DARK_BLUE_GREY};'>Duplicate Value Lookup (Across All JEs)</h2>", unsafe_allow_html=True)
+# Use JE data currently displayed for selecting the value to search for
+je_data_for_dup_check = st.session_state.get('related_jes_df', pd.DataFrame())
+
+if isinstance(je_data_for_dup_check, pd.DataFrame) and not je_data_for_dup_check.empty:
+    # Define potential columns for duplicate checking (usually identifiers or text fields)
+    potential_dup_cols = ['Customer', 'Memo', 'Transaction Id', JE_AMOUNT_COLUMN];
+    # Check which of these columns exist in the *full* JE dataset (je_detail_df)
+    available_dup_cols = [col for col in potential_dup_cols if col in je_detail_df.columns]
+
+    if available_dup_cols:
+        col1, col2 = st.columns(2);
+        with col1:
+            last_dup_col_index = utils.get_index(available_dup_cols, st.session_state.get('dup_col'))
+            selected_dup_col = st.selectbox("Check Column:", available_dup_cols, index=last_dup_col_index, key='dup_col_select')
+        with col2:
+            value_options = []; last_dup_val = st.session_state.get('dup_val'); dup_val_index = 0
+            # Get unique values from the *currently displayed* JEs for the selected column
+            if selected_dup_col and selected_dup_col in je_data_for_dup_check.columns:
+                 # Ensure options are hashable and sorted for consistent display
+                 try: value_options = sorted(list(je_data_for_dup_check[selected_dup_col].dropna().unique()))
+                 except TypeError: value_options = list(je_data_for_dup_check[selected_dup_col].dropna().unique()) # Fallback if sorting fails
+
+            # Find index of last selected value safely
+            try: dup_val_index = utils.get_index(value_options, last_dup_val) if value_options else 0
+            except Exception: dup_val_index = 0 # Default to first if error
+
+            selected_dup_val = st.selectbox(f"Value from Current JEs:", value_options, index=dup_val_index, key='dup_val_select', disabled=(not value_options))
+
+        # Button to trigger the search across the full dataset
+        find_duplicates_button = st.button("Find All Occurrences", key='find_dup_btn')
+
+        if find_duplicates_button and selected_dup_col and selected_dup_val is not None:
+            # Store selection and set trigger flag on button press
+            st.session_state.dup_col = selected_dup_col; st.session_state.dup_val = selected_dup_val; st.session_state.dup_search_triggered = True;
+            st.rerun() # Rerun immediately to perform the search in the next cycle
+
+        # Search logic executes if trigger flag is set
+        if st.session_state.get('dup_search_triggered'):
+            col_to_check = st.session_state.dup_col; val_to_find = st.session_state.dup_val;
+            st.write(f"Finding all JEs where **{col_to_check}** is **'{val_to_find}'**...")
+            if col_to_check and val_to_find is not None:
+                try: # --- Robust Duplicate Filtering Logic ---
+                    # Use the full je_detail_df for searching
+                    target_col = je_detail_df[col_to_check]
+                    target_dtype = target_col.dtype
+
+                    # Handle NaN comparison correctly
+                    if pd.isna(val_to_find):
+                        duplicate_jes_df = je_detail_df[target_col.isna()]
+                    # Handle numeric comparison (including floats with tolerance)
+                    elif pd.api.types.is_numeric_dtype(target_dtype):
+                        try: val_num = pd.to_numeric(val_to_find) # Convert search value to numeric
+                        except (ValueError, TypeError): raise ValueError(f"Value '{val_to_find}' is not compatible with numeric column '{col_to_check}'.")
+
+                        if pd.api.types.is_float_dtype(target_dtype) or isinstance(val_num, float):
+                            # Use tolerance for float comparison
+                            duplicate_jes_df = je_detail_df[np.isclose(target_col.astype(float).fillna(np.nan), float(val_num), atol=1e-6, equal_nan=True)]
+                        else:
+                            # Use direct comparison for integers (after ensuring types match)
+                             duplicate_jes_df = je_detail_df[target_col.fillna(pd.NA).astype(pd.Int64Dtype()) == int(val_num)]
+                    # Handle datetime comparison (compare dates only by default)
+                    elif pd.api.types.is_datetime64_any_dtype(target_dtype):
+                         val_dt = pd.to_datetime(val_to_find, errors='coerce')
+                         if pd.notna(val_dt):
+                            duplicate_jes_df = je_detail_df[pd.to_datetime(target_col).dt.normalize() == val_dt.normalize()]
+                         else: # If conversion fails, try string comparison as fallback
+                            duplicate_jes_df = je_detail_df[target_col.astype(str).str.strip() == str(val_to_find).strip()]
+                    # Default to string comparison (case-sensitive, strips whitespace)
+                    else:
+                         duplicate_jes_df = je_detail_df[target_col.astype(str).str.strip() == str(val_to_find).strip()]
+
+                    # --- Display results ---
+                    if not duplicate_jes_df.empty:
+                        st.write(f"Found {len(duplicate_jes_df)} matching entries across all JE data:")
+                        # Format results for display
+                        dup_df_display = duplicate_jes_df.copy()
+                        dup_amount_cols = [c for c in dup_df_display.columns if 'Amount' in c or c == JE_AMOUNT_COLUMN]
+                        dup_date_cols = [c for c in dup_df_display.columns if 'Date' in c or c == JE_DATE_COLUMN]
+                        for c in dup_amount_cols: dup_df_display[c] = dup_df_display[c].apply(utils.format_amount_safely)
+                        dup_col_config = {c: st.column_config.DateColumn(format="YYYY-MM-DD") for c in dup_date_cols}
+                        # Display the results table
+                        st.dataframe(dup_df_display, use_container_width=True, column_config=dup_col_config, hide_index=True)
+                    else:
+                        st.info(f"No other JEs found where '{col_to_check}' is '{val_to_find}' in the full dataset.")
+
+                except KeyError: st.error(f"Duplicate Check Error: Column '{col_to_check}' not found in the main JE dataset.")
+                except ValueError as ve: st.error(f"Duplicate Check Lookup Error: {ve}") # Catch specific conversion/comparison errors
+                except Exception as e: st.error(f"Unexpected error during duplicate lookup: {e}"); st.exception(e)
+
+            # Reset trigger *after* search attempt (whether successful or not)
+            st.session_state.dup_search_triggered = False
+            # Rerun ONLY if search was triggered to clear the "Finding..." message and results
+            st.rerun()
+
+    else: st.warning("No suitable columns identified for duplicate value checking in the JE data.")
+else: st.info("Select an Account/Period with Journal Entries displayed to enable the duplicate value lookup feature.")

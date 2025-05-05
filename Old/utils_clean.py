@@ -1,11 +1,11 @@
 # utils.py
-# **** START OF FULL SCRIPT ****
+# **** START OF utils.py ****
 import pandas as pd
 import numpy as np
 import requests
-import json
-import os
-import streamlit as st
+import json # **** ADDED IMPORT ****
+import os  # **** ADDED IMPORT ****
+import streamlit as st # Needed for st.secrets potentially later
 from openai import OpenAI, AzureOpenAI
 
 # --- Define EY Parthenon Inspired Colors ---
@@ -18,20 +18,19 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 # Store settings in the same directory as the script for simplicity
 SETTINGS_FILE = "llm_analyzer_settings.json"
 
-# --- Settings Defaults ---
+# --- Settings Load/Save Functions ---
+
 DEFAULT_SETTINGS = { # Define defaults in one place
     'llm_provider': 'Ollama',
     'chosen_ollama_model': None,
     'openai_api_key': '',
-    'openai_model_name': "gpt-4o-mini", # Updated Default
+    'openai_model_name': "gpt-4o", # Default OpenAI model
     'azure_endpoint': '',
     'azure_api_key': '',
     'azure_deployment_name': '',
     'azure_api_version': "2024-02-01", # Default Azure Version
     'llm_context_limit': 32000,
 }
-
-# --- Settings Load/Save Functions ---
 
 def load_settings() -> dict:
     """Loads settings from the JSON file."""
@@ -65,20 +64,8 @@ def save_settings(settings_dict: dict):
         st.error(f"An unexpected error occurred while saving settings: {e}")
 
 
-# **** CORRECTED FUNCTION TO LOAD SETTINGS INTO SESSION STATE ****
-def ensure_settings_loaded():
-    """Loads settings from file and ensures they are in session state."""
-    app_settings = load_settings()
-    # print(f"DEBUG ensure_settings_loaded: Loaded {app_settings}") # Optional debug
-    settings_keys = DEFAULT_SETTINGS.keys()
-    for key in settings_keys:
-        # ALWAYS update session state from file/defaults at start of page run
-        # This overwrites potentially stale/corrupted state from page transitions
-        st.session_state[key] = app_settings.get(key, DEFAULT_SETTINGS.get(key))
-        # Optional Debug: print(f"DEBUG ensure_settings_loaded: Set st.session_state['{key}'] = {st.session_state[key]}")
-
-# --- Other Utility Functions ---
-def format_amount_safely(value):
+# --- Other Utility Functions (Unchanged) ---
+def format_amount_safely(value): # ... no changes ...
     if pd.isna(value): return ""
     if isinstance(value, (int, float, np.number)):
         try: return f"{value:,.0f}"
@@ -87,12 +74,12 @@ def format_amount_safely(value):
         try: num = pd.to_numeric(value); return f"{num:,.0f}"
         except (TypeError, ValueError): return str(value)
 
-def get_index(options_list, value):
+def get_index(options_list, value): # ... no changes ...
     if not options_list: return 0
     try: return options_list.index(value)
     except ValueError: return 0
 
-def highlight_outliers_pandas(row, diffs_df, thresholds_series, color=EY_YELLOW, text_color=EY_TEXT_ON_YELLOW):
+def highlight_outliers_pandas(row, diffs_df, thresholds_series, color=EY_YELLOW, text_color=EY_TEXT_ON_YELLOW): # ... no changes ...
     try:
         if row.name not in diffs_df.index or row.name not in thresholds_series.index: return [''] * len(row)
         row_diff = diffs_df.loc[row.name]; threshold_value = thresholds_series.loc[row.name]
@@ -107,7 +94,8 @@ def highlight_outliers_pandas(row, diffs_df, thresholds_series, color=EY_YELLOW,
             if i < len(styles): styles[i] = f'background-color: {color}; color: {text_color};'
     return styles
 
-def format_je_for_llm(je_df, amount_col, max_raw_rows=30):
+def format_je_for_llm(je_df, amount_col, max_raw_rows=30): # ... no changes ...
+    # ... (logic remains same) ...
     if je_df is None or je_df.empty: return "No Journal Entry details provided."
     if amount_col not in je_df.columns:
         potential_amount_cols = [col for col in je_df.columns if 'Amount' in col]
@@ -143,12 +131,12 @@ def format_je_for_llm(je_df, amount_col, max_raw_rows=30):
             if not top_memos.empty: summary += f"\n\nTop {len(top_memos)} Memos by Net Amount:\n" + top_memos.apply(format_amount_safely).to_markdown()
         return summary
 
-def estimate_token_count(text: str) -> int:
+def estimate_token_count(text: str) -> int: # ... no changes ...
     if not isinstance(text, str) or not text: return 0
     return int(len(text) / 4) + 1
 
-# --- LLM Call Functions ---
-def _call_ollama_stream_internal(prompt, model_name, base_url=OLLAMA_BASE_URL):
+# --- LLM Call Functions (Unchanged) ---
+def _call_ollama_stream_internal(prompt, model_name, base_url=OLLAMA_BASE_URL): # ... no changes ...
     api_url = f"{base_url}/api/generate"; payload = {"model": model_name, "prompt": prompt, "stream": True}
     headers = {'Content-Type': 'application/json'}; response_stream = None
     try:
@@ -171,7 +159,7 @@ def _call_ollama_stream_internal(prompt, model_name, base_url=OLLAMA_BASE_URL):
             try: response_stream.close()
             except Exception: pass
 
-def _call_openai_stream_internal(prompt, model_name, api_key):
+def _call_openai_stream_internal(prompt, model_name, api_key): # ... no changes ...
     if not api_key: yield "**Error:** OpenAI API Key not provided."; return
     try:
         client = OpenAI(api_key=api_key); stream = client.chat.completions.create( model=model_name, messages=[{"role": "user", "content": prompt}], stream=True, timeout=180,)
@@ -179,7 +167,7 @@ def _call_openai_stream_internal(prompt, model_name, api_key):
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content is not None: yield chunk.choices[0].delta.content
     except Exception as e: yield f"\n\n**Error calling OpenAI API:** {str(e)}\n"
 
-def _call_azure_openai_stream_internal(prompt, deployment_name, endpoint, api_key, api_version):
+def _call_azure_openai_stream_internal(prompt, deployment_name, endpoint, api_key, api_version): # ... no changes ...
     if not all([deployment_name, endpoint, api_key, api_version]): yield "**Error:** Azure OpenAI config incomplete."; return
     try:
         client = AzureOpenAI(azure_endpoint=endpoint, api_key=api_key, api_version=api_version)
@@ -188,7 +176,7 @@ def _call_azure_openai_stream_internal(prompt, deployment_name, endpoint, api_ke
              if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content is not None: yield chunk.choices[0].delta.content
     except Exception as e: yield f"\n\n**Error calling Azure OpenAI API:** {str(e)}\n"
 
-def call_llm_stream(provider: str, config: dict, prompt: str):
+def call_llm_stream(provider: str, config: dict, prompt: str): # ... no changes ...
     if provider == "Ollama":
         model_name = config.get('model_name');
         if not model_name: yield "**Error:** Ollama model name missing."; return

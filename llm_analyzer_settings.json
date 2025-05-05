@@ -1,0 +1,11 @@
+{
+    "llm_provider": "Ollama",
+    "chosen_ollama_model": "gemma3:4b-it-qat",
+    "openai_api_key": "asdfasdf",
+    "openai_model_name": "gpt-4o-mini",
+    "azure_endpoint": "",
+    "azure_api_key": "",
+    "azure_deployment_name": "",
+    "azure_api_version": "2024-02-01",
+    "llm_context_limit": 32000
+}
