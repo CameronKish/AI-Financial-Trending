@@ -1,4 +1,7 @@
-pandas
-plotly
-openpyxl
 streamlit
+pandas
+numpy
+requests
+plotly
+openai
+openpyxl
