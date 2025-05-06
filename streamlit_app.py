@@ -1,4 +1,3 @@
-# streamlit_app.py
 # **** START OF FULL SCRIPT ****
 import streamlit as st
 import pandas as pd
@@ -6,7 +5,8 @@ from datetime import datetime
 import time
 import requests
 import data_processor
-import utils # Now includes ensure_settings_loaded, DEFAULT_SETTINGS
+import utils # Now includes ensure_settings_loaded, DEFAULT_SETTINGS, get_langchain_llm
+import tools # <--- ADD THIS IMPORT
 
 # --- Page Config ---
 st.set_page_config(layout="wide", page_title="P&L Analyzer")
@@ -50,6 +50,13 @@ def trigger_data_load():
                      if acc in temp_account_options: default_chart_selection.append(acc)
                  if not default_chart_selection and temp_account_options: default_chart_selection = temp_account_options[:min(3, len(temp_account_options))]
                  st.session_state.chart_accounts_selection = default_chart_selection
+            # Generate and store schema info for agent tools
+            # No need to store schema in session state, the tool can generate it on the fly
+            # try:
+            #     st.session_state['pl_schema_info'] = {col: str(dtype) for col, dtype in pl_flat_df.dtypes.items()}
+            #     st.session_state['je_schema_info'] = {col: str(dtype) for col, dtype in je_detail_df.dtypes.items()}
+            # except Exception as e_schema:
+            #     st.warning(f"Could not pre-generate schema info: {e_schema}")
             return True
         else:
              st.session_state.data_loaded = False; return False
@@ -67,7 +74,9 @@ other_required_keys = {
     'related_jes_df': pd.DataFrame(columns=st.session_state.get('column_config', {}).get("JE_DETAILS_BASE", [])), 'needs_je_refetch': False,
     'dup_col': None, 'dup_val': None, 'dup_search_triggered': False, 'chart_accounts_selection': [], 'outlier_threshold': 2.0,
     'ollama_status': "Not Checked", 'ollama_models': [], # Keep dynamic Ollama state here
-    'llm_analyses': {}, 'llm_streaming_key': None # Keep runtime state here
+    'llm_analyses': {}, 'llm_streaming_key': None, # Keep runtime state here
+    'ai_insights_messages': [], # Initialize chat history for new page
+    tools.INTERMEDIATE_DF_KEY: None, # Initialize key used by agent tools
 }
 for key, default_value in other_required_keys.items():
      if key not in st.session_state: st.session_state[key] = default_value
@@ -98,8 +107,9 @@ st.markdown(f"""
 <div style="background-color:{utils.EY_DARK_BLUE_GREY}; padding: 15px; border-radius: 5px; color: white;">
 Use the navigation sidebar on the left ( < ) to switch between the analysis pages:
 <ul>
-    <li><b>📊 P&L Analysis & Drilldown:</b> View the P&L, identify outliers, drill down into Journal Entries, and analyze period activity with a local LLM.</li>
+    <li><b>📊 P&L Analysis & Drilldown:</b> View the P&L, identify outliers, drill down into Journal Entries, and analyze period activity with an LLM.</li>
     <li><b>📈 Visualizations:</b> Explore trends and patterns in your P&L and JE data.</li>
+    <li><b>🤖 AI Insights:</b> Chat with an AI assistant to ask questions and get insights directly from your data.</li>
 </ul>
 Data is loaded from <code>{data_processor.EXCEL_FILE_PATH}</code>. Configure LLM settings below. Settings are saved locally to <code>{utils.SETTINGS_FILE}</code>.
 </div>

@@ -1,4 +1,3 @@
-# utils.py
 # **** START OF FULL SCRIPT ****
 import pandas as pd
 import numpy as np
@@ -7,6 +6,13 @@ import json
 import os
 import streamlit as st
 from openai import OpenAI, AzureOpenAI
+
+# --- LangChain Imports ---
+# Add these imports for LangChain LLM wrappers
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
+from langchain_community.chat_models import ChatOllama
+from langchain_core.messages import HumanMessage # Example, might be needed later
+
 
 # --- Define EY Parthenon Inspired Colors ---
 EY_YELLOW = "#FFE600"; EY_DARK_BLUE_GREY = "#2E2E38"; EY_TEXT_ON_YELLOW = EY_DARK_BLUE_GREY
@@ -147,7 +153,7 @@ def estimate_token_count(text: str) -> int:
     if not isinstance(text, str) or not text: return 0
     return int(len(text) / 4) + 1
 
-# --- LLM Call Functions ---
+# --- LLM Call Functions (Original - Kept for P&L Page Analysis) ---
 def _call_ollama_stream_internal(prompt, model_name, base_url=OLLAMA_BASE_URL):
     api_url = f"{base_url}/api/generate"; payload = {"model": model_name, "prompt": prompt, "stream": True}
     headers = {'Content-Type': 'application/json'}; response_stream = None
@@ -189,6 +195,7 @@ def _call_azure_openai_stream_internal(prompt, deployment_name, endpoint, api_ke
     except Exception as e: yield f"\n\n**Error calling Azure OpenAI API:** {str(e)}\n"
 
 def call_llm_stream(provider: str, config: dict, prompt: str):
+    """ Original streaming function for P&L page direct LLM calls."""
     if provider == "Ollama":
         model_name = config.get('model_name');
         if not model_name: yield "**Error:** Ollama model name missing."; return
@@ -203,4 +210,82 @@ def call_llm_stream(provider: str, config: dict, prompt: str):
         if not all([deployment_name, endpoint, api_key, api_version]): yield "**Error:** Azure OpenAI config missing."; return
         yield from _call_azure_openai_stream_internal(prompt=prompt, deployment_name=deployment_name, endpoint=endpoint, api_key=api_key, api_version=api_version)
     else: yield f"**Error:** Unknown LLM provider '{provider}'."; return
-# **** END OF utils.py ****
+
+
+# --- NEW: LangChain LLM Instantiation ---
+def get_langchain_llm(temperature=0.0, streaming=True):
+    """
+    Instantiates and returns a LangChain Chat LLM based on session state settings.
+
+    Args:
+        temperature (float): The temperature to use for the LLM.
+        streaming (bool): Whether to enable streaming from the LLM.
+
+    Returns:
+        A LangChain ChatLLM object (e.g., ChatOpenAI, ChatOllama, AzureChatOpenAI) or None if config is invalid.
+    """
+    # Ensure settings are loaded into session state first if needed elsewhere
+    # ensure_settings_loaded() # Called at start of page scripts anyway
+
+    provider = st.session_state.get('llm_provider')
+    llm = None
+
+    try:
+        if provider == "Ollama":
+            model_name = st.session_state.get('chosen_ollama_model')
+            if not model_name:
+                st.error("Ollama provider selected, but no model chosen/available.")
+                return None
+            llm = ChatOllama(
+                model=model_name,
+                base_url=OLLAMA_BASE_URL,
+                temperature=temperature,
+                # Streaming handled by agent executor potentially
+            )
+            print(f"INFO: Initialized ChatOllama with model: {model_name}")
+
+        elif provider == "OpenAI":
+            api_key = st.session_state.get('openai_api_key')
+            model_name = st.session_state.get('openai_model_name', DEFAULT_SETTINGS['openai_model_name'])
+            if not api_key:
+                st.error("OpenAI provider selected, but API Key is missing.")
+                return None
+            llm = ChatOpenAI(
+                api_key=api_key,
+                model=model_name,
+                temperature=temperature,
+                streaming=streaming,
+                # max_tokens= # Consider adding if needed
+            )
+            print(f"INFO: Initialized ChatOpenAI with model: {model_name}")
+
+        elif provider == "Azure OpenAI":
+            api_key = st.session_state.get('azure_api_key')
+            endpoint = st.session_state.get('azure_endpoint')
+            deployment_name = st.session_state.get('azure_deployment_name')
+            api_version = st.session_state.get('azure_api_version', DEFAULT_SETTINGS['azure_api_version'])
+            if not all([api_key, endpoint, deployment_name, api_version]):
+                st.error("Azure OpenAI provider selected, but configuration is incomplete.")
+                return None
+            llm = AzureChatOpenAI(
+                azure_endpoint=endpoint,
+                openai_api_key=api_key,
+                azure_deployment=deployment_name,
+                openai_api_version=api_version,
+                temperature=temperature,
+                streaming=streaming,
+                # max_tokens= # Consider adding if needed
+            )
+            print(f"INFO: Initialized AzureChatOpenAI with deployment: {deployment_name}")
+
+        else:
+            st.error(f"Unsupported LLM provider selected: {provider}")
+            return None
+
+        return llm
+
+    except Exception as e:
+        st.error(f"Failed to initialize LangChain LLM for provider {provider}: {e}")
+        return None
+
+# **** END OF FULL SCRIPT ****
