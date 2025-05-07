@@ -1,3 +1,4 @@
+# pages/3_AI_Insights.py
 # **** START OF FULL SCRIPT ****
 import streamlit as st
 import pandas as pd

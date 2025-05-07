@@ -1,4 +1,4 @@
-# pages/2_📈_Visualizations.py
+# pages/2_Visualizations.py
 # **** START OF FULL SCRIPT ****
 import streamlit as st
 import pandas as pd
