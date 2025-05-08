@@ -161,24 +161,40 @@ def filter_dataframe(source: str, conditions: str) -> str:
         return f"Error filtering data with condition '{conditions}': {str(e)}. Check syntax, quotes, and column names (available: {available_cols}). Use backticks `` for names with spaces."
 
 @tool("fuzzy_filter_by_text_in_column", args_schema=FuzzyFilterArgs)
-def fuzzy_filter_by_text_in_column(source: str, text_column_to_search: str, query_text: str, score_threshold: int = 80) -> str:
+def fuzzy_filter_by_text_in_column(source: str, text_column_to_search: str, query_text: str, score_threshold: int = 80) -> dict: # MODIFIED return type to dict
     """
     Filters the DataFrame (source: 'P&L' or 'JE') where the 'text_column_to_search'
     fuzzily matches the 'query_text' above a given 'score_threshold' (default 80).
     Useful for finding inexact matches in text fields like 'Memo' or 'Description'.
     The filtered result is stored internally for subsequent operations, becoming the active DataFrame.
+    Returns a message and the filtered data for auditing.
     """
     try:
         df = _get_dataframe(source)
-        if text_column_to_search not in df.columns: return f"Error: Text column '{text_column_to_search}' not in {source}."
-        df[text_column_to_search] = df[text_column_to_search].astype(str).fillna('')
-        scores = df[text_column_to_search].apply(lambda x: fuzz.partial_ratio(query_text.lower(), x.lower()) if x else 0)
-        filtered_df = df[scores >= score_threshold].copy(); count = len(filtered_df)
-        st.session_state[INTERMEDIATE_DF_KEY] = filtered_df
-        if count == 0: return f"No items in '{text_column_to_search}' fuzzily matched '{query_text}' (score >= {score_threshold}%)."
-        return f"Successfully filtered by fuzzy text on '{text_column_to_search}' for '{query_text}'. Result: {count} rows."
-    except ImportError: return "Error: 'thefuzz' library not installed."
-    except Exception as e: return f"Error during fuzzy text filter: {str(e)}"
+        if text_column_to_search not in df.columns:
+            return {"error": f"Text column '{text_column_to_search}' not found in {source}."} # Return error as dict
+
+        df[text_column_to_search] = df[text_column_to_search].astype(str).fillna('') # Ensure string type for fuzzy matching
+        
+        # Apply fuzzy matching
+        scores = df[text_column_to_search].apply(lambda x: fuzz.partial_ratio(query_text.lower(), str(x).lower()))
+        filtered_df = df[scores >= score_threshold].copy()
+        count = len(filtered_df)
+        
+        st.session_state[INTERMEDIATE_DF_KEY] = filtered_df # Set the active DataFrame
+        
+        message = ""
+        if count == 0:
+            message = f"No items in '{text_column_to_search}' fuzzily matched '{query_text}' (score >= {score_threshold}%). Active DataFrame is empty."
+        else:
+            message = f"Successfully filtered by fuzzy text on '{text_column_to_search}' for '{query_text}'. Result: {count} rows. This is now the active DataFrame."
+        
+        return {"message": message, "audit_dataframe": filtered_df.to_dict(orient='records')}
+    except ImportError:
+        # This error should ideally be caught at app startup if thefuzz is missing
+        return {"error": "CRITICAL_ERROR: 'thefuzz' library is not installed. This tool cannot function."}
+    except Exception as e:
+        return {"error": f"Error during fuzzy text filter: {str(e)}"}
 
 @tool("aggregate_dataframe", args_schema=AggregateArgs)
 def aggregate_dataframe(group_by_columns: List[str], agg_specs: Dict[str,str]) -> str:
